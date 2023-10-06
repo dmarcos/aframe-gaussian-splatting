@@ -1,116 +1,121 @@
-AFRAME.registerComponent("gaussian_splatting", {
+AFRAME.registerComponent('gaussian-splatting', {
 	schema: {
-		src: {type: 'string', default: "train.splat"},
+		src: {type: 'asset', default: 'train.splat'},
 	},
 	init: function () {
 		this.el.sceneEl.renderer.setPixelRatio(1);
 
+    let size = new THREE.Vector2();
+    this.el.sceneEl.renderer.getSize(size);
+    const focal = (size.y / 2.0) / Math.tan(this.el.sceneEl.camera.el.components.camera.data.fov / 2.0 * Math.PI / 180.0);
+
+    const geometry = this.geometry = new THREE.PlaneGeometry(4, 4);
+    const material = this.material = new THREE.ShaderMaterial({
+      uniforms : {
+        'viewport': {value: new Float32Array([size.x, size.y])},
+        'focal': {value: focal},
+      },
+      vertexShader: `
+        varying vec4 vColor;
+        varying vec2 vPosition;
+        uniform vec2 viewport;
+        uniform float focal;
+
+        void main () {
+          vec4 center = vec4(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2], 1);
+          // Adjust View Pose
+          mat4 adjViewMatrix = inverse(viewMatrix);
+          adjViewMatrix[0][1] *= -1.0;
+          adjViewMatrix[1][0] *= -1.0;
+          adjViewMatrix[1][2] *= -1.0;
+          adjViewMatrix[2][1] *= -1.0;
+          adjViewMatrix[3][1] *= -1.0;
+          adjViewMatrix = inverse(adjViewMatrix);
+          mat4 modelView = adjViewMatrix * modelMatrix;
+
+          vec4 camspace = modelView * center;
+          vec4 pos2d = projectionMatrix * mat4(1,0,0,0,0,-1,0,0,0,0,1,0,0,0,0,1)  * camspace;
+                    
+          float bounds = 1.2 * pos2d.w;
+          if (pos2d.z < -pos2d.w || pos2d.x < -bounds || pos2d.x > bounds
+            || pos2d.y < -bounds || pos2d.y > bounds) {
+            gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+            return;
+          }
+
+          mat3 J = mat3(
+            focal / camspace.z, 0., -(focal * camspace.x) / (camspace.z * camspace.z), 
+            0., -focal / camspace.z, (focal * camspace.y) / (camspace.z * camspace.z), 
+            0., 0., 0.
+          );
+
+          mat3 W = transpose(mat3(modelView));
+          mat3 T = W * J;
+          mat3 cov = transpose(T) * mat3(instanceMatrix) * T;
+
+          vec2 vCenter = vec2(pos2d) / pos2d.w;
+
+          float diagonal1 = cov[0][0] + 0.3;
+          float offDiagonal = cov[0][1];
+          float diagonal2 = cov[1][1] + 0.3;
+
+          float mid = 0.5 * (diagonal1 + diagonal2);
+          float radius = length(vec2((diagonal1 - diagonal2) / 2.0, offDiagonal));
+          float lambda1 = mid + radius;
+          float lambda2 = max(mid - radius, 0.1);
+          vec2 diagonalVector = normalize(vec2(offDiagonal, lambda1 - diagonal1));
+          vec2 v1 = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
+          vec2 v2 = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
+
+          vColor = vec4(instanceMatrix[0][3], instanceMatrix[1][3], instanceMatrix[2][3], instanceMatrix[3][3]);
+          vPosition = position.xy;
+
+          gl_Position = vec4(
+            vCenter 
+              + position.x * v2 / viewport * 2.0 
+              + position.y * v1 / viewport * 2.0, 0.0, 1.0);
+        }
+        `,
+      fragmentShader: `
+        varying vec4 vColor;
+        varying vec2 vPosition;
+
+        void main () {
+          float A = -dot(vPosition, vPosition);
+          if (A < -4.0) discard;
+          float B = exp(A) * vColor.a;
+          gl_FragColor = vec4(B * vColor.rgb, B);
+        }
+        `
+    } );
+
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.AddEquation;
+    material.blendSrc = THREE.OneMinusDstAlphaFactor;
+    material.blendDst = THREE.OneFactor;
+    material.blendSrcAlpha = THREE.OneMinusDstAlphaFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+    material.depthTest = false;
+    material.needsUpdate = true;
+
+    window.addEventListener('resize', () => {
+      let size = new THREE.Vector2();
+      this.el.sceneEl.renderer.getSize(size);
+      const focal = (size.y / 2.0) / Math.tan(this.el.sceneEl.camera.el.components.camera.data.fov / 2.0 * Math.PI / 180.0);
+      material.uniforms.viewport.value[0] = size.x;
+      material.uniforms.viewport.value[1] = size.y;
+      material.uniforms.focal.value = focal;
+    });
+
+    this.loadSplatFile();
+
+  },
+
+  loadSplatFile: function () {
 		fetch(this.data.src)
 		.then((data) => data.blob())
 		.then((res) => res.arrayBuffer())
 		.then((buffer) => {
-			let size = new THREE.Vector2();
-			this.el.sceneEl.renderer.getSize(size);
-
-			const focal = (size.y / 2.0) / Math.tan(this.el.sceneEl.camera.el.components.camera.data.fov / 2.0 * Math.PI / 180.0);
-
-			const geometry = new THREE.PlaneGeometry( 4, 4);
-			const material = new THREE.ShaderMaterial( {
-				uniforms : {
-					"viewport": {value: new Float32Array([size.x, size.y])},
-					"focal": {value: focal},
-				},
-				vertexShader: `
-					varying vec4 vColor;
-					varying vec2 vPosition;
-					uniform vec2 viewport;
-					uniform float focal;
-
-					void main () {
-						vec4 center = vec4(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2], 1);
-						// Adjust View Pose
-						mat4 adjViewMatrix = inverse(viewMatrix);
-						adjViewMatrix[0][1] *= -1.0;
-						adjViewMatrix[1][0] *= -1.0;
-						adjViewMatrix[1][2] *= -1.0;
-						adjViewMatrix[2][1] *= -1.0;
-						adjViewMatrix[3][1] *= -1.0;
-						adjViewMatrix = inverse(adjViewMatrix);
-						mat4 modelView = adjViewMatrix * modelMatrix;
-
-						vec4 camspace = modelView * center;
-						vec4 pos2d = projectionMatrix * mat4(1,0,0,0,0,-1,0,0,0,0,1,0,0,0,0,1)  * camspace;
-											
-						float bounds = 1.2 * pos2d.w;
-						if (pos2d.z < -pos2d.w || pos2d.x < -bounds || pos2d.x > bounds
-							|| pos2d.y < -bounds || pos2d.y > bounds) {
-							gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-							return;
-						}
-
-						mat3 J = mat3(
-							focal / camspace.z, 0., -(focal * camspace.x) / (camspace.z * camspace.z), 
-							0., -focal / camspace.z, (focal * camspace.y) / (camspace.z * camspace.z), 
-							0., 0., 0.
-						);
-
-						mat3 W = transpose(mat3(modelView));
-						mat3 T = W * J;
-						mat3 cov = transpose(T) * mat3(instanceMatrix) * T;
-
-						vec2 vCenter = vec2(pos2d) / pos2d.w;
-
-						float diagonal1 = cov[0][0] + 0.3;
-						float offDiagonal = cov[0][1];
-						float diagonal2 = cov[1][1] + 0.3;
-
-						float mid = 0.5 * (diagonal1 + diagonal2);
-						float radius = length(vec2((diagonal1 - diagonal2) / 2.0, offDiagonal));
-						float lambda1 = mid + radius;
-						float lambda2 = max(mid - radius, 0.1);
-						vec2 diagonalVector = normalize(vec2(offDiagonal, lambda1 - diagonal1));
-						vec2 v1 = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
-						vec2 v2 = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
-
-						vColor = vec4(instanceMatrix[0][3], instanceMatrix[1][3], instanceMatrix[2][3], instanceMatrix[3][3]);
-						vPosition = position.xy;
-
-						gl_Position = vec4(
-							vCenter 
-								+ position.x * v2 / viewport * 2.0 
-								+ position.y * v1 / viewport * 2.0, 0.0, 1.0);
-					}
-					`,
-				fragmentShader: `
-					varying vec4 vColor;
-					varying vec2 vPosition;
-
-					void main () {
-						float A = -dot(vPosition, vPosition);
-						if (A < -4.0) discard;
-						float B = exp(A) * vColor.a;
-						gl_FragColor = vec4(B * vColor.rgb, B);
-					}
-					`
-			} );
-
-			material.blending = THREE.CustomBlending;
-			material.blendEquation = THREE.AddEquation;
-			material.blendSrc = THREE.OneMinusDstAlphaFactor;
-			material.blendDst = THREE.OneFactor;
-			material.blendSrcAlpha = THREE.OneMinusDstAlphaFactor;
-			material.blendDstAlpha = THREE.OneFactor;
-			material.depthTest = false;
-			material.needsUpdate = true;
-
-			window.addEventListener('resize', () => {
-				let size = new THREE.Vector2();
-				this.el.sceneEl.renderer.getSize(size);
-				const focal = (size.y / 2.0) / Math.tan(this.el.sceneEl.camera.el.components.camera.data.fov / 2.0 * Math.PI / 180.0);
-				material.uniforms.viewport.value[0] = size.x;
-				material.uniforms.viewport.value[1] = size.y;
-				material.uniforms.focal.value = focal;
-			});
 
 			const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
 			let vertexCount = Math.floor(buffer.byteLength / rowLength);
@@ -159,7 +164,7 @@ AFRAME.registerComponent("gaussian_splatting", {
 			const camera_mtx = this.el.sceneEl.camera.el.object3D.matrixWorld.elements;
 			let view = new Float32Array([camera_mtx[2], camera_mtx[6], camera_mtx[10]]);
 
-			this.iMesh = new THREE.InstancedMesh(geometry, material, vertexCount);
+			this.iMesh = new THREE.InstancedMesh(this.geometry, this.material, vertexCount);
 			this.iMesh.frustumCulled = false;
 			this.iMesh.instanceMatrix.array = this.sortSplats(matrices, view);
 			this.iMesh.instanceMatrix.needsUpdate = true;
@@ -167,8 +172,8 @@ AFRAME.registerComponent("gaussian_splatting", {
 
 			this.worker = new Worker(
 				URL.createObjectURL(
-					new Blob(["(", this.createWorker.toString(), ")(self)"], {
-						type: "application/javascript",
+					new Blob(['(', this.createWorker.toString(), ')(self)'], {
+						type: 'application/javascript',
 					}),
 				),
 			);
@@ -186,6 +191,7 @@ AFRAME.registerComponent("gaussian_splatting", {
 			this.sortReady = true;
 		});
 	},
+
 	tick: function(time, timeDelta) {
 		if(this.sortReady){
 			this.sortReady = false;
@@ -194,6 +200,7 @@ AFRAME.registerComponent("gaussian_splatting", {
 			this.worker.postMessage({view}, [view.buffer]);
 		}
 	},
+
 	createWorker: function (self) {
 		let sortFunction;
 		let matrices;
@@ -212,6 +219,7 @@ AFRAME.registerComponent("gaussian_splatting", {
 			}
 		};
 	},
+
 	sortSplats: function sortSplats(matrices, view){
 		const vertexCount = matrices.length/16;
 	

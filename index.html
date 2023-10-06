@@ -2,11 +2,17 @@
 <html>
   <head>
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
-    <script src="https://unpkg.com/aframe-gaussian-splatting-component@0.0.3/dist/aframe-gaussian-splatting-component.min.js"></script>
+    <script src="index.js"></script>
   </head>
   <body>
     <a-scene>
-      <a-entity gaussian_splatting="src: https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat;" position="0 -1.5 -2.0"></a-entity>
+      <a-assets>
+        <a-asset-item id="splat-file" src="https://huggingface.co/cakewalk/splat-data/resolve/main/truck.splat"></a-asset-item>
+      </a-assets>
+      <a-entity
+        position="0 -1.5 -2.0"
+        gaussian-splatting="src: #splat-file">    
+      </a-entity>
     </a-scene>
   </body>
 </html>
